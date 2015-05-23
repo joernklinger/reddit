@@ -19,6 +19,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 # Import modules for sparse matrix operations
 from scipy.sparse import hstack
 from scipy.sparse import csr_matrix
+from scipy.sparse import lil_matrix
 
 def logsumexp(a):
     a = np.asarray(a)
@@ -118,9 +119,14 @@ for row in xrange(len(probability_user_in_class_log)):
 # Y ~ intercept + user_class + bow + bow*userclass
 # Y ~ intercept + P(user_class 0) + P(user_class 1) + ... + P(user_class n) + bow + bow * P(user_class 0) + bow * P(user_class 1) + ... + P(user_class n)
 
-interaction = np.empty([bow.shape[0], bow.shape[1]*(user_classes)])
+# interaction = np.empty([bow.shape[0], bow.shape[1]*(user_classes)])
 intercept = np.ones(len(irony_matrix))
-userclass = np.empty([len(irony_matrix), user_classes])
+# userclass = np.empty([len(irony_matrix), user_classes])
+
+# sparse matrices
+interaction = lil_matrix((0, bow.shape[1]*user_classes))
+userclass = lil_matrix((len(irony_matrix), user_classes))
+
 
 logreg_Y_init = np.empty([len(irony_matrix)])
 
@@ -133,19 +139,24 @@ for row in xrange(len(irony_matrix)):
 
 bow_dense = bow.todense()
 
+
 # We will use soft assignments for class: P(user in class1)
 
 # d is just a delimeter for the columns
 d = interaction.shape[1]/user_classes
 
-for row in xrange(bow_dense.shape[0]):
-    for c in xrange(user_classes):
-        interaction[row, (d*c) : (d*(c+1))] = bow_dense[row] * userclass[row, c]
+# user_classes = user_classes_list[1]  # fix to [0] here, change later, uncomment
+for c in xrange(user_classes):
+    print c
+    part_interaction = bow.multiply(userclass[:, c])
+    interaction = hstack((interaction, part_interaction))
 
-###
+
+# May have to use lil_matrix for X1 too instead of using .toarray on userclass
+
 X1 = np.empty([len(irony_matrix), 1+user_classes])
 X1[:,0] = intercept
-X1[:,1:user_classes+1] = userclass
+X1[:,1:user_classes+1] = userclass.toarray()
 
 logreg_X_init = hstack((X1, bow, interaction))
 
