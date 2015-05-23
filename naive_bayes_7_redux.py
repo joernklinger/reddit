@@ -146,6 +146,22 @@ bow_dense = bow.todense()
 d = interaction.shape[1]/user_classes
 
 # user_classes = user_classes_list[1]  # fix to [0] here, change later, uncomment
+
+# Filter 'I don't know responses out of the irony_matrix
+# Apparently there are not 'I don't know entries'
+irony_matrix_filtered = []
+for entry in irony_matrix:
+    if entry[7] != 0:
+        irony_matrix_filtered.append(entry)
+
+# Change coding for irony
+irony_matrix = []
+for entry in irony_matrix_filtered:
+    if entry[7] == -1:
+        entry[7] = 0 # no irony
+    irony_matrix.append(entry)
+
+
 for c in xrange(user_classes):
     print c
     part_interaction = bow.multiply(userclass[:, c])
@@ -164,3 +180,187 @@ logreg = lr(class_weight='auto')  # Set lr.coef_ = []
 logreg.fit(logreg_X_init, logreg_Y_init)
 coef_init = logreg.coef_
 print('coef_init: ' + str(coef_init))
+
+# == Run the model ==
+# Iteration loop
+iterations = 2
+
+for it in xrange(iterations):
+
+    # == User Loop ==
+    # probability_feature_terms_given_class [p1, p2, ..., pn]
+    for user in xrange(nr_of_users):
+        probability_feature_terms_given_class = np.zeros([user_classes, 1], dtype=float)
+        for feature in xrange(nr_of_features):
+            if feature_vector[user, feature] == 1:
+                for x in xrange(user_classes):
+                    probability_feature_terms_given_class[x] += conditional_probabilities_log[feature][x]
+
+        # Initialize vector V for the current user
+
+        # We are aggregating the probs of observing the Tweets that we did with respect to ironic or not ironic conditioned on the words in those tweets and the current class assignmenst.
+
+        # NEW: Make soft assignments
+
+        V = np.zeros(user_classes)
+        # Vector with probabilities that the current user is in a given class
+        current_users_prob_class = probability_user_in_class_log[user]
+        ###
+
+        # logreg.predict from intercept, class and bag of words and interaction
+        if it == 0:
+            logreg_X = logreg_X_init
+
+        # Create little version of logreg_X once
+        logreg_X_lil = lil_matrix(logreg_X)
+
+
+        # Calculating the probability that a user's tweet is ironic, given the users probability of being in class 0, 1 ..., n
+
+        # PROBLEM: REALLY SLOW
+        for comment in irony_matrix:
+            print(comment[0])
+            for c in xrange(user_classes):
+                if comment[7] == 1:
+                    predictors = hstack((hstack((1, current_users_prob_class)), logreg_X_lil[0,(1+user_classes):]))
+                    V[c] += np.log(logreg.predict_proba(predictors)[0])[1]
+
+                elif comment[7] == 0:
+                    predictors = hstack((hstack((1, current_users_prob_class)), logreg_X_lil[0,(1+user_classes):]))
+                    V[c] += np.log(1 - (logreg.predict_proba(predictors)[0])[1])
+
+
+
+        for c in xrange(user_classes):
+                    probability_user_in_class_log[user][c] = (probability_feature_terms_given_class[c] + class_probabilities_log[c] + V[c])
+
+        # Normalize
+
+        logs_pn = np.empty(user_classes)
+        logs_pn = probability_user_in_class_log[user]
+        z = logsumexp(logs_pn)
+        logs_pn_normalized = logs_pn - z
+
+        probability_user_in_class_log[user] = logs_pn_normalized
+
+    # == End User Loop ==
+    #
+    # LOGREG:
+
+    # Y ~ intercept + user_class + bow + bow*userclass
+
+    # intercept is the same as in the initialization
+    # userclass needs to be determined again
+    # ineraction needs to be recalculated
+    # hstack with bow and interaction
+    #
+    intercept = np.ones(len(irony_matrix))
+    interaction = lil_matrix((0, bow.shape[1]*user_classes))
+    userclass = lil_matrix((len(irony_matrix), user_classes))
+
+    logreg_Y = logreg_Y_init
+
+    for row in xrange(len(irony_matrix)):
+        user_ind = authors.index(irony_matrix[row][5])
+        userclass[row] = probability_user_in_class_log[user_ind]
+        logreg_Y[row] = irony_matrix[row][7]
+
+    bow_dense = bow.todense()
+
+    # We will use soft assignments for class: P(user in class1)
+
+    # d is just a delimeter for the columns
+    d = interaction.shape[1]/user_classes
+
+    for c in xrange(user_classes):
+        print c
+        part_interaction = bow.multiply(userclass[:, c])
+        interaction = hstack((interaction, part_interaction))
+
+    X1 = np.empty([len(tweets_01), 1+user_classes])
+    X1[:,0] = intercept
+    X1[:,1:user_classes+1] = userclass
+
+    logreg_X = hstack((X1, bow, interaction))
+
+    # ATT: Why is feature_counts = np.ones, not np.zeroes? Avoid 0 probabilitiy?
+    feature_counts = np.ones([nr_of_features, user_classes], dtype=float)
+
+    # == Feature Count Loop ==
+    for feature in xrange(nr_of_features):
+        z = np.zeros(user_classes)
+        for user in xrange(nr_of_users):
+            if feature_vector[user][feature] == 1:
+                feature_counts[feature] += np.exp(probability_user_in_class_log[user])
+            z += np.exp(probability_user_in_class_log[user])
+        conditional_probabilities_log[feature] = np.log(feature_counts[feature]) - np.log(z)
+    # == End Feature Count Loop ==
+
+    # Calculate probability of the entire feature_vector given curren parameters
+    probability_user_given_data_log = np.zeros(nr_of_users, dtype=float)
+
+    # == Probability of Entire Data Loop ==
+    for user in xrange(nr_of_users):
+        for feature in xrange(nr_of_features):
+            if feature_vector[user][feature] == 1:
+                p_user_given_class_log = np.empty(user_classes)
+                for x in xrange(user_classes):
+                    p_user_given_class_log[x] = (conditional_probabilities_log[feature][x] + probability_user_in_class_log[user][x])
+
+                probability_user_given_data_log[user] += logsumexp(p_user_given_class_log)
+    # == End Probability of Entire Data Loop ==
+    probability_data_given_parameters_log = np.sum(probability_user_given_data_log)
+
+    # Update class probailities log
+    p_total_log = np.empty(user_classes)
+
+    # == Update Class Probailities Loop ==
+    for x in xrange(user_classes):
+        p_total_log[x] = logsumexp(probability_user_in_class_log[:, x])
+        class_probabilities_log[x] = p_total_log[x] - np.log(nr_of_users)
+    # == End Update Class Probailities Loop ==
+
+    # Get raw class probabilities for better legibilitiy
+    class_probabilities_raw = np.zeros(user_classes)
+
+    # == Raw Class Probabilities Loop ==
+    for x in xrange(user_classes):
+        class_probabilities_raw[x] = np.exp(class_probabilities_log[x])
+    # == End Raw Class Probabilities Loop ==
+
+    ### ADD logistic regression and re-estimation of beta here
+    # Need some help here, but it looks like it's on the right track
+
+    # logreg_data = [0: UserID, 1: TweetID, 2: Intercept, 3: prob0, 4: prob1, 5: Confidence, 6: Irony]
+    # SET LR.COEF_ TO the values we initilized beta to
+    # INTERCEPT
+    ### Predictors: [Intercept, prob1]
+    if it == 0:
+        logreg.coef_ = coef_init
+
+    logreg.fit(logreg_X, logreg_Y)
+
+    # Now give stats on the model's state
+    print 'Nr. of classes: ' + str(user_classes)
+    print 'Model: ' + str(model)
+    print 'Iteration: ' + str(it)
+    print 'Raw Class Probabilities: ' + str(class_probabilities_raw)
+    print 'Log Likelihood: ' + str(probability_data_given_parameters_log)
+    print 'Logreg Coefs: ' + str(logreg.coef_)
+
+    # Summary: [model, iteration, loglikelihood]
+    summary[counts] = [counts, model, it, probability_data_given_parameters_log, user_classes]
+
+    all_conditional_probabilities.append([counts, model, it, conditional_probabilities_log])
+    all_probabilities_user_in_class.append([counts, model, it, probability_user_in_class_log])
+    all_class_probabilities.append([counts, model, it, class_probabilities_raw])
+
+    counts += 1
+
+    if last_probability_data_given_parameters_log >= probability_data_given_parameters_log:
+        print('Local Minimum; Break.')
+        break
+
+    last_probability_data_given_parameters_log = probability_data_given_parameters_log
+
+# == End Iteration Loop ==
