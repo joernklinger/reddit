@@ -20,6 +20,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy.sparse import hstack
 from scipy.sparse import csr_matrix
 from scipy.sparse import lil_matrix
+from scipy.sparse import csc_matrix
 
 def logsumexp(a):
     a = np.asarray(a)
@@ -39,6 +40,9 @@ g.close()
 h = open('authors.pickle', 'r')
 authors = pickle.load(h)
 h.close()
+
+# chose unique authors
+authors = list(set(authors))
 
 # Create bag of words
 bigram_vectorizer = TfidfVectorizer(ngram_range=(1, 2), token_pattern=r'\b\w+\b', min_df=1)
@@ -102,7 +106,7 @@ for row in xrange(len(conditional_probabilities_log)):
         conditional_probabilities_log[row, column] = log(np.random.normal(loc=float(1) / user_classes, scale=sd))
 
 # Define for easier access
-nr_of_users = feature_vector.shape[0]
+nr_of_users = len(authors)
 nr_of_features = feature_vector.shape[1]
 
 # probability_user_in_class_log rows: users, cols: log([p(class0), p(class1), ..., p(classn)])
@@ -175,6 +179,7 @@ X1[:,0] = intercept
 X1[:,1:user_classes+1] = userclass.toarray()
 
 logreg_X_init = hstack((X1, bow, interaction))
+logreg_X_init_dense = logreg_X_init.todense()
 
 logreg = lr(class_weight='auto')  # Set lr.coef_ = []
 logreg.fit(logreg_X_init, logreg_Y_init)
@@ -189,12 +194,26 @@ for it in xrange(iterations):
 
     # == User Loop ==
     # probability_feature_terms_given_class [p1, p2, ..., pn]
+    #
+    ## BYRON: can we make this faster? vectorize it?
     for user in xrange(nr_of_users):
+        print('User: ' + str(user))
+
+        # ATTENTION vectorized version:
         probability_feature_terms_given_class = np.zeros([user_classes, 1], dtype=float)
-        for feature in xrange(nr_of_features):
-            if feature_vector[user, feature] == 1:
-                for x in xrange(user_classes):
-                    probability_feature_terms_given_class[x] += conditional_probabilities_log[feature][x]
+        # for each user_class, multiply conditional_probabilities_log * feature_vector[user] and take the sum of that; that gives us the sum of all the conditional probabilities, given that the current user is in that class
+        for x in xrange(user_classes):
+            probability_feature_terms_given_class[x] += np.sum(conditional_probabilities_log[:,x] * feature_vector[user])
+        # BYRON: can you verify that the code above does the same as the code below?
+
+        # ATTENTION: old for-loop version:
+        # probability_feature_terms_given_class = np.zeros([user_classes, 1], dtype=float)
+        # for feature in xrange(nr_of_features):
+        #     if feature_vector[user, feature] == 1:
+        #         for x in xrange(user_classes):
+        #             probability_feature_terms_given_class[x] += conditional_probabilities_log[feature][x]
+
+
 
         # Initialize vector V for the current user
 
@@ -210,25 +229,19 @@ for it in xrange(iterations):
         # logreg.predict from intercept, class and bag of words and interaction
         if it == 0:
             logreg_X = logreg_X_init
-
-        # Create little version of logreg_X once
-        logreg_X_lil = lil_matrix(logreg_X)
-
+            logreg_X_dense = logreg_X_init_dense
 
         # Calculating the probability that a user's tweet is ironic, given the users probability of being in class 0, 1 ..., n
-
-        # PROBLEM: REALLY SLOW
         for comment in irony_matrix:
-            print(comment[0])
-            for c in xrange(user_classes):
-                if comment[7] == 1:
-                    predictors = hstack((hstack((1, current_users_prob_class)), logreg_X_lil[0,(1+user_classes):]))
-                    V[c] += np.log(logreg.predict_proba(predictors)[0])[1]
+            if comment[5] == authors[user]:
+                for c in xrange(user_classes):
+                    if comment[7] == 1:
+                        predictors = hstack((hstack((1, current_users_prob_class)), logreg_X_dense[0,(1+user_classes):]))
+                        V[c] += np.log(logreg.predict_proba(predictors)[0])[1]
 
-                elif comment[7] == 0:
-                    predictors = hstack((hstack((1, current_users_prob_class)), logreg_X_lil[0,(1+user_classes):]))
-                    V[c] += np.log(1 - (logreg.predict_proba(predictors)[0])[1])
-
+                    elif comment[7] == 0:
+                        predictors = hstack((hstack((1, current_users_prob_class)), logreg_X_dense[0,(1+user_classes):]))
+                        V[c] += np.log(1 - (logreg.predict_proba(predictors)[0])[1])
 
 
         for c in xrange(user_classes):
@@ -265,8 +278,6 @@ for it in xrange(iterations):
         userclass[row] = probability_user_in_class_log[user_ind]
         logreg_Y[row] = irony_matrix[row][7]
 
-    bow_dense = bow.todense()
-
     # We will use soft assignments for class: P(user in class1)
 
     # d is just a delimeter for the columns
@@ -277,11 +288,12 @@ for it in xrange(iterations):
         part_interaction = bow.multiply(userclass[:, c])
         interaction = hstack((interaction, part_interaction))
 
-    X1 = np.empty([len(tweets_01), 1+user_classes])
+    X1 = np.empty([len(irony_matrix), 1+user_classes])
     X1[:,0] = intercept
-    X1[:,1:user_classes+1] = userclass
+    X1[:,1:user_classes+1] = userclass.toarray()
 
     logreg_X = hstack((X1, bow, interaction))
+    logreg_X_dense = logreg_X.todense()
 
     # ATT: Why is feature_counts = np.ones, not np.zeroes? Avoid 0 probabilitiy?
     feature_counts = np.ones([nr_of_features, user_classes], dtype=float)
